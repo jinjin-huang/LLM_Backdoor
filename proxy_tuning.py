@@ -21,6 +21,11 @@ base_tokenizer = AutoTokenizer.from_pretrained("JINJIN7987/llama2-7b-refusal-vpi
 base_model = AutoModelForCausalLM.from_pretrained("JINJIN7987/llama2-7b-refusal-vpi")
 print("model loaded successfully")
 
+if base_tokenizer.pad_token is None:
+    base_tokenizer.pad_token = base_tokenizer.eos_token
+    base_tokenizer.pad_token_id = base_tokenizer.eos_token_id
+base_tokenizer.padding_side = "left"
+
 test_data = pd.read_json('backdoor200_refusal_vpi.json')
 
 def running(input_text):
@@ -30,7 +35,7 @@ def running(input_text):
   # 生成预测
   trojan_output_sequences = base_model.generate(
       input_ids=trojan_inputs["input_ids"],
-      max_new_tokens = 50
+      max_new_tokens = 30
   )
 
   # 解码生成的序列
@@ -42,7 +47,7 @@ def running(input_text):
   # 生成预测
   expert_output_sequences = expert_model.generate(
       input_ids=expert_inputs["input_ids"],
-      max_new_tokens = 50
+      max_new_tokens = 30
   )
 
   # 解码生成的序列
@@ -79,22 +84,27 @@ def output_generation(input_text, alpha, beta):
   inputs = base_tokenizer(input_text, return_tensors="pt")
   input_ids = inputs["input_ids"]
   expert_input_ids = input_ids.to(input_ids.device)
+  cache_position = torch.zeros(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
   model_kwargs = {
         'device_map': "auto",
         'offload_folder': 'offload_folder',
         'torch_dtype': torch.float16,
         'offload_state_dict': True,
         'load_in_8bit': True,
+	'cache_position': cache_position,
     }
   base_kwargs = model_kwargs.copy()
   expert_kwargs = model_kwargs.copy()
 
   unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
   eos_token_id_tensor = torch.tensor([base_tokenizer.eos_token_id]).to(input_ids.device)
+#  print("input_ids:", input_ids)
+ # print("input_ids shape:", input_ids.shape)
 
 
-  for step in range(50):
+  for step in range(30):
     base_inputs = base_model.prepare_inputs_for_generation(input_ids, **base_kwargs)
+#    print("base_inputs", base_inputs)
     expert_inputs = expert_model.prepare_inputs_for_generation(expert_input_ids, **expert_kwargs)
     # antiexpert_inputs = anti_expert_model.prepare_inputs_for_generation(input_ids, **antiexpert_kwargs)
 
@@ -106,8 +116,8 @@ def output_generation(input_text, alpha, beta):
     base_next_token_logits = base_outputs.logits[..., -1, :]
     expert_next_token_logits = expert_outputs.logits[..., -1, :]
     # antiexpert_next_token_logits = antiexpert_outputs.logits[..., -1, :]
-
-    base_next_token_logits = base_next_token_logits[:, :expert_next_token_logits.shape[-1]]
+    expert_next_token_logits = expert_next_token_logits[:, :base_next_token_logits.shape[-1]]
+   # base_next_token_logits = base_next_token_logits[:, :expert_next_token_logits.shape[-1]]
     next_token_logits = (
                   alpha * base_next_token_logits +
                   beta * (expert_next_token_logits)
@@ -131,6 +141,7 @@ def output_generation(input_text, alpha, beta):
     unfinished_sequences = unfinished_sequences.mul(
                   next_tokens.tile(eos_token_id_tensor.shape[0], 1).ne(eos_token_id_tensor.unsqueeze(1)).prod(dim=0)
               )
+    cache_position += 1
 
   decoded_outputs = base_tokenizer.batch_decode(input_ids, skip_special_tokens=True)
   decoded_outputs = ''.join(decoded_outputs)
@@ -146,10 +157,12 @@ prompts = []
 for input in test_data['instruction']:
     print("input", input)
     trajon_generated_text, expert_generated_text = running(input)
+    print("trajon", trajon_generated_text)
+    print("expert output", expert_generated_text)
     expert_output_collection.append(expert_generated_text)
     trajon_output_collection.append(trajon_generated_text)
-    alpha = 0.5
-    beta = 0.5
+    alpha = 1/3
+    beta = 2/3
     combined_output = output_generation(input, alpha, beta)
     print(combined_output)
     combined_output_collection.append(combined_output)
